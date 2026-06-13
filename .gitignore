@@ -10,3 +10,13 @@ wheels/
 .venv
 
 .claude
+
+# Media gambar dari customer (jangan commit data pribadi)
+media/
+
+# Secrets — JANGAN PERNAH commit (API key, dll). Pakai .env.example sebagai template.
+.env
+.env.local
+*.db
+*.db-shm
+*.db-wal

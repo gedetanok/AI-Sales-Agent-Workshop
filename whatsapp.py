@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import os
 import re
 
@@ -73,12 +74,15 @@ async def send_reply(phone: str, reply: str) -> None:
 
 
 def extract_incoming(payload: dict) -> dict | None:
-    """Parse webhook 'messages.upsert' Evolution API -> {phone, text, name}.
+    """Parse webhook 'messages.upsert' Evolution API.
+
+    Return dict berisi:
+      phone, name, text, media_type ("image"|None), mime, message (raw data)
 
     Return None untuk event yang harus DIABAIKAN:
     - pesan dari diri sendiri (fromMe) -> mencegah AI membalas dirinya = loop
     - pesan grup (@g.us) -> agent ini untuk chat personal
-    - non-teks (gambar/voice) -> di luar scope workshop
+    - tipe lain (voice/dokumen/stiker) -> di luar scope workshop
     """
     data = payload.get("data") or {}
     key = data.get("key") or {}
@@ -92,13 +96,45 @@ def extract_incoming(payload: dict) -> dict | None:
         return None
 
     message = data.get("message") or {}
+    base = {"phone": remote_jid.split("@")[0], "name": data.get("pushName")}
+
+    # GAMBAR: caption (kalau ada) jadi teksnya, byte-nya diambil belakangan.
+    image_msg = message.get("imageMessage")
+    if image_msg is not None:
+        return {**base,
+                "text": image_msg.get("caption") or "",
+                "media_type": "image",
+                "mime": image_msg.get("mimetype", "image/jpeg"),
+                "message": data}
+
+    # TEKS biasa
     text = (message.get("conversation")
             or (message.get("extendedTextMessage") or {}).get("text"))
     if not text:
-        return None                      # non-teks
+        return None                      # tipe lain yang belum didukung
 
-    return {
-        "phone": remote_jid.split("@")[0],
-        "text": text,
-        "name": data.get("pushName"),
-    }
+    return {**base, "text": text, "media_type": None, "mime": None, "message": data}
+
+
+async def fetch_media_b64(client: httpx.AsyncClient, message: dict) -> tuple[bytes, str] | None:
+    """Minta Evolution men-decrypt media WhatsApp -> (bytes, mime).
+
+    WhatsApp mengirim media terenkripsi; byte mentahnya TIDAK ada di webhook.
+    Endpoint ini yang mengembalikan base64 siap pakai.
+    """
+    try:
+        resp = await client.post(
+            f"{EVOLUTION_API_URL}/chat/getBase64FromMediaMessage/{EVOLUTION_INSTANCE}",
+            headers=HEADERS,
+            json={"message": message, "convertToMp4": False},
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        b64 = body.get("base64")
+        mime = body.get("mimetype") or "image/jpeg"
+        if b64:
+            return base64.b64decode(b64), mime
+        print(f"  [media] respons tanpa base64, keys={list(body.keys())}")
+    except httpx.HTTPError as e:
+        print(f"  [media] gagal ambil base64: {e}")
+    return None

@@ -93,13 +93,15 @@ GENERATE_CONFIG = types.GenerateContentConfig(
 
 # Agent Core Loop
 
-def run_agent(history: list, user_message: str, phone: str) -> tuple[str, list]:
+def run_agent(history: list, user_message: str, phone: str,
+            images: list[tuple[bytes, str]] | None = None) -> tuple[str, list]:
     """Jalankan satu giliran percakapan.
 
     Args:
         history: list of types.Content dari giliran-giliran sebelumnya
         user_message: pesan user terbaru (sudah digabung buffer kalau dari WA)
         phone: nomor WhatsApp customer (di-inject supaya tool bisa pakai)
+        images: daftar (bytes, mime) gambar dari customer untuk dibaca Gemini
 
     Returns:
         (jawaban_text, history_baru) -- history_baru sudah termasuk giliran ini,
@@ -111,11 +113,15 @@ def run_agent(history: list, user_message: str, phone: str) -> tuple[str, list]:
     date_ctx = (f"Hari ini {HARI[now.weekday()]}, {now.day} {BULAN[now.month - 1]} {now.year} "
                 f"({now:%Y-%m-%d}), pukul {now:%H:%M}")
 
+    if not user_message:
+        user_message = "(customer mengirim gambar tanpa teks)"
+
+    parts = [types.Part(text=f"[Konteks: {date_ctx}. Nomor WhatsApp customer: {phone}]\n{user_message}")]
+    for img_bytes, mime in (images or []):
+        parts.append(types.Part.from_bytes(data=img_bytes, mime_type=mime))
+
     contents = list(history)
-    contents.append(types.Content(
-        role="user",
-        parts=[types.Part(text=f"[Konteks: {date_ctx}. Nomor WhatsApp customer: {phone}]\n{user_message}")],
-    ))
+    contents.append(types.Content(role="user", parts=parts))
 
     try:
         for _ in range(MAX_TOOL_ITERATIONS):

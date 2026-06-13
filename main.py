@@ -1,22 +1,39 @@
 
 import asyncio
 import os
+import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 
 from agent import run_agent
 from database import init_db, seed_db
 from memory import memory
-from whatsapp import extract_incoming, send_reply
+from whatsapp import extract_incoming, fetch_media_b64, send_reply
 
 load_dotenv()
 
 BUFFER_SECONDS = float(os.getenv("BUFFER_SECONDS", "8"))
 
-buffers: dict[str, list[str]] = defaultdict(list)
+# Folder simpan gambar customer (dipakai dashboard Day 2 untuk render thumbnail).
+MEDIA_DIR = Path(__file__).parent / "media"
+MEDIA_DIR.mkdir(exist_ok=True)
+
+
+def save_media(phone: str, data: bytes, mime: str) -> str:
+    """Simpan byte gambar ke folder media, return path relatif untuk dashboard."""
+    ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}.get(mime, "jpg")
+    fname = f"{phone}_{uuid.uuid4().hex[:8]}.{ext}"
+    (MEDIA_DIR / fname).write_bytes(data)
+    return f"media/{fname}"
+
+
+# Tiap item buffer adalah dict dari extract_incoming (teks dan/atau gambar).
+buffers: dict[str, list[dict]] = defaultdict(list)
 buffer_tasks: dict[str, asyncio.Task] = {}
 locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
@@ -42,13 +59,32 @@ async def process_buffered_messages(phone: str) -> None:
         pending = buffers.pop(phone, [])
         if not pending:
             return
-        combined = "\n".join(pending)
-        print(f"[buffer] {phone}: {len(pending)} pesan digabung -> {combined!r}")
+
+        # Gabung teks + ambil & simpan gambar (decrypt base64 via Evolution).
+        texts: list[str] = []
+        images: list[tuple[bytes, str]] = []
+        memory_lines: list[str] = []
+        async with httpx.AsyncClient(timeout=30) as client:
+            for item in pending:
+                if item.get("text"):
+                    texts.append(item["text"])
+                if item.get("media_type") == "image":
+                    fetched = await fetch_media_b64(client, item["message"])
+                    if fetched:
+                        img_bytes, mime = fetched
+                        path = save_media(phone, img_bytes, mime)
+                        images.append((img_bytes, mime))
+                        memory_lines.append(f"[image:{path}]")  # ditandai untuk dashboard
+
+        combined = "\n".join(texts)
+        # Teks yang disimpan ke memory/dashboard: caption + penanda gambar.
+        memory_text = "\n".join([combined] + memory_lines).strip() or "[customer mengirim gambar]"
+        print(f"[buffer] {phone}: {len(pending)} pesan, {len(images)} gambar -> {memory_text!r}")
 
         # SAKLAR TAKEOVER: admin sedang pegang chat ini? AI diam total.
         if not memory.is_ai_enabled(phone):
             print(f"[takeover] AI nonaktif untuk {phone}, pesan disimpan saja.")
-            memory.add(phone, "user", combined)
+            memory.add(phone, "user", memory_text)
             return
 
         history = memory.get_history(phone)
@@ -56,12 +92,12 @@ async def process_buffered_messages(phone: str) -> None:
         # run_agent itu blocking (sync) -> jalankan di thread supaya
         # event loop tetap bisa menerima webhook nomor lain.
         try:
-            reply, _ = await asyncio.to_thread(run_agent, history, combined, phone)
+            reply, _ = await asyncio.to_thread(run_agent, history, combined, phone, images)
         except Exception as e:
             print(f"[error] gagal proses {phone}: {e}")
             return
 
-        memory.add(phone, "user", combined)
+        memory.add(phone, "user", memory_text)
         memory.add(phone, "model", reply)
 
         # DETEKSI [HANDOVER]: matikan AI untuk nomor ini sebelum membalas.
@@ -94,10 +130,11 @@ async def webhook(request: Request):
     if incoming is None:
         return {"status": "ignored"}
 
-    phone, text = incoming["phone"], incoming["text"]
-    print(f"[masuk] {phone} ({incoming.get('name')}): {text!r}")
+    phone = incoming["phone"]
+    tag = " +gambar" if incoming.get("media_type") == "image" else ""
+    print(f"[masuk] {phone} ({incoming.get('name')}): {incoming['text']!r}{tag}")
 
-    buffers[phone].append(text)
+    buffers[phone].append(incoming)
     schedule_processing(phone)
     return {"status": "buffered", "pending": len(buffers[phone])}
 
