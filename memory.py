@@ -70,6 +70,24 @@ class Memory:
                 session.add(Contact(phone=phone, ai_enabled=enabled))
             session.commit()
 
+    def set_name(self, phone: str, name: str) -> None:
+        """Simpan nama WhatsApp (pushName) customer supaya tampil di dashboard.
+
+        Dipanggil tiap pesan masuk. Membuat Contact kalau belum ada,
+        atau memperbarui namanya kalau berubah.
+        """
+        if not name:
+            return
+        with get_session() as session:
+            contact = session.get(Contact, phone)
+            if contact:
+                if contact.name != name:
+                    contact.name = name
+                    session.commit()
+            else:
+                session.add(Contact(phone=phone, name=name))
+                session.commit()
+
     def get_contact_name(self, phone: str) -> Optional[str]:
         with get_session() as session:
             contact = session.get(Contact, phone)
