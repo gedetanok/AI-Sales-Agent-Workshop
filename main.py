@@ -8,9 +8,8 @@ from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
-from fastapi.responses import RedirectResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, RedirectResponse, Response
 
 from agent import run_agent
 from database import init_db, seed_db
@@ -56,17 +55,17 @@ def _get_s3():
 
 
 def save_media(phone: str, data: bytes, mime: str) -> str:
-    """Simpan byte gambar -> kembalikan referensi untuk dashboard.
+    """Simpan byte gambar, kembalikan path relatif 'media/<file>'.
 
-    R2 dikonfigurasi  -> upload, return URL publik absolut.
-    Belum dikonfigurasi -> tulis ke media/ lokal, return path relatif.
+    Penyimpanan: R2 (kalau aktif) atau disk lokal. Penyajian: SELALU lewat
+    route /media/<file> di app (lihat fungsi media()), bukan URL R2 langsung.
     """
     fname = f"{phone}_{uuid.uuid4().hex[:8]}.{EXT.get(mime, 'jpg')}"
     if R2_ENABLED:
         _get_s3().put_object(Bucket=R2_BUCKET, Key=fname, Body=data, ContentType=mime)
-        return f"{R2_PUBLIC_URL}/{fname}"
-    (MEDIA_DIR / fname).write_bytes(data)
-    return f"media/{fname}"
+    else:
+        (MEDIA_DIR / fname).write_bytes(data)
+    return f"media/{fname}"   # selalu disajikan lewat /media/<file> (proxy app)
 
 
 # Tiap item buffer adalah dict dari extract_incoming (teks dan/atau gambar).
@@ -86,15 +85,36 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Glowria AI Sales Agent", lifespan=lifespan)
 
-# Dashboard (Day 2): router + serve gambar customer di /media
+# Dashboard (Day 2): router
 app.include_router(dashboard_router)
-app.mount("/media", StaticFiles(directory=MEDIA_DIR), name="media")
 
 
 @app.get("/")
 def root():
     """Buka domain langsung (localhost/Railway) -> arahkan ke dashboard."""
     return RedirectResponse(url="/dashboard")
+
+
+@app.get("/media/{fname}")
+def media(fname: str):
+    """Sajikan gambar lewat domain app (proxy): ambil dari R2 kalau aktif, else disk.
+
+    Browser tidak pernah menyentuh domain R2 publik (r2.dev) -> kebal blokir/
+    intersepsi TLS di jaringan tertentu. Server (Railway) yang ambil dari R2.
+    """
+    fname = os.path.basename(fname)                       # cegah path traversal
+    headers = {"Cache-Control": "public, max-age=86400"}
+    if R2_ENABLED:
+        try:
+            obj = _get_s3().get_object(Bucket=R2_BUCKET, Key=fname)
+        except Exception:
+            raise HTTPException(status_code=404, detail="Gambar tidak ditemukan.")
+        return Response(content=obj["Body"].read(),
+                        media_type=obj.get("ContentType", "image/jpeg"), headers=headers)
+    fpath = MEDIA_DIR / fname
+    if not fpath.exists():
+        raise HTTPException(status_code=404, detail="Gambar tidak ditemukan.")
+    return FileResponse(fpath, headers=headers)
 
 
 

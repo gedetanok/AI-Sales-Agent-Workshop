@@ -232,7 +232,10 @@ function renderMsgBody(text){
   while((m=re.exec(text))){
     const before=text.slice(last,m.index).replace(/\[NEXT\]/g,'\n').trim();
     if(before) html+=`<div>${esc(before).replace(/\n/g,'<br>')}</div>`;
-    const src=m[1].startsWith('http')?m[1]:'/'+m[1];   // R2 (URL absolut) atau lokal
+    let ref=m[1];
+    // URL R2 publik lama -> alihkan ke proxy app (/media) supaya kebal blokir r2.dev
+    if(ref.includes('.r2.dev/')||ref.includes('.r2.cloudflarestorage.com/')) ref='media/'+ref.split('/').pop();
+    const src=ref.startsWith('http')?ref:'/'+ref;   // gambar selalu lewat domain app
     html+=`<img src="${src}" class="rounded-xl max-w-[220px] mt-1">`;
     last=m.index+m[0].length;
   }
